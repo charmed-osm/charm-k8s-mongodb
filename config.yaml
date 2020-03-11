@@ -1,0 +1,9 @@
+options:
+  image:
+    type: string
+    default: mongo:latest
+    description: The docker image to install.
+  port:
+    type: int
+    default: 27017
+    description: Port
