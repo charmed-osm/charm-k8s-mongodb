@@ -1,0 +1,7 @@
+name: mongodb-k8s
+summary: A mongodb of an operator framework k8s charm
+description: |
+    Describe your charm here
+series:
+   - kubernetes
+min-juju-version: 2.7.0
