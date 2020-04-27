@@ -17,20 +17,26 @@ from ops.model import (
 
 import subprocess
 import logging
+from mongodb_cluster import MongoDBCluster
+
+try:
+    from pymongo import MongoClient
+    from pymongo.errors import OperationFailure
+except ImportError:
+    subprocess.run("python3 -m pip install pymongo", shell=True)
+    from pymongo import MongoClient
+    from pymongo.errors import OperationFailure
+
+logger = logging.getLogger(__name__)
+
 
 class MongoCharm(CharmBase):
     state = StoredState()
-    logger = logging.getLogger("mongo")
-    def __init__(self, *args):
-        super().__init__(*args)
-        # An example of setting charm state
-        # that's persistent across events
-        self.state.set_default(is_started=False)
 
-        if not self.state.is_started:
-            self.state.is_started = True
+    def __init__(self, framework, key):
+        super().__init__(framework, key)
 
-        # Register all of the events we want to observe
+        # Observe Charm related events
         for event in (
             # Charm events
             self.on.config_changed,
@@ -38,6 +44,34 @@ class MongoCharm(CharmBase):
             self.on.upgrade_charm,
         ):
             self.framework.observe(event, self)
+
+        # Initialize peer relation
+        self.peers = MongoDBCluster(self, "cluster")
+        self.framework.observe(self.peers.on.members_changed, self.on_members_changed)
+
+    def on_members_changed(self, event):
+        config = self.framework.model.config
+        logger.debug("Members changed")
+        if self.framework.model.unit.is_leader():
+            logger.debug(self.peers.replSetConfigured)
+            if not self.peers.replSetConfigured and config["replica-set"]:
+                fqdns = self.peers.fqdns
+                try:
+                    client = MongoClient(fqdns[self.framework.model.unit.name])
+                    # Commands to initialize
+                    config = {
+                        "_id": config["replica-set-name"],
+                        "members": [
+                            {"_id": i, "host": fqdns[unit]} for i, unit in enumerate(fqdns)
+                        ],
+                    }
+                    client.admin.command("replSetInitiate", config)
+                except Exception:
+                    pass
+                finally:
+                    # Set replica set configured
+                    self.peers.on.replica_set_configured.emit()
+                # client = MongoClient('mongodb://10.1.47.58:27017,10.1.47.59:27017/?replicaSet=rs0').
 
     def _apply_spec(self, spec):
         # Only apply the spec if this unit is a leader.
@@ -49,22 +83,52 @@ class MongoCharm(CharmBase):
         config = self.framework.model.config
 
         ports = [{"name": "mongo", "containerPort": config["port"], "protocol": "TCP"}]
-
-        spec = {
-            'containers': [{
-                'name': self.framework.model.app.name,
-                "image": config["image"],
-                "ports": ports,
-                "command": [
-                    "mongod",
-                    "--bind_ip",
-                    "0.0.0.0",
-                    "--port",
-                    "{}".format(config["port"])
-                ]
-            }],
+        command = [
+            "mongod",
+            "--bind_ip",
+            "0.0.0.0",
+            "--port",
+            "{}".format(config["port"]),
+        ]
+        if config["replica-set"]:
+            command.append("--replSet")
+            command.append("{}".format(config["replica-set-name"]))
+        kubernetes = {
+            "readinessProbe": {
+                "tcpSocket": {"port": config["port"]},
+                "timeoutSeconds": 5,
+                "periodSeconds": 5,
+                "initialDelaySeconds": 10,
+            },
+            "livenessProbe": {
+                "exec": {
+                    "command": [
+                        "/bin/sh",
+                        "-c",
+                        'mongo --port {} --eval "rs.status()" | grep -vq "REMOVED"'.format(
+                            config["port"]
+                        ),
+                    ]
+                },
+                "timeoutSeconds": 5,
+                "initialDelaySeconds": 45,
+            },
         }
-
+        spec = {
+            "version": 2,
+            "serviceAccount": {
+                "rules": [{"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]}]
+            },
+            "containers": [
+                {
+                    "name": self.framework.model.app.name,
+                    "image": config["image"],
+                    "ports": ports,
+                    "command": command,
+                    "kubernetes": kubernetes,
+                }
+            ],
+        }
         return spec
 
     def on_config_changed(self, event):
@@ -101,6 +165,7 @@ class MongoCharm(CharmBase):
 
         # When maintenance is done, return to an Active state
         unit.status = ActiveStatus()
+
 
 if __name__ == "__main__":
     main(MongoCharm)

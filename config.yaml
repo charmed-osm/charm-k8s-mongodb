@@ -7,3 +7,11 @@ options:
     type: int
     default: 27017
     description: Port
+  replica-set:
+    type: boolean
+    default: false
+    description: Boolean to set the replica-set
+  replica-set-name:
+    type: string
+    default: rs0
+    description: Replica set name
